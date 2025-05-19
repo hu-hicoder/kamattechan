@@ -1,6 +1,7 @@
 import os
 import json
 from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.concurrency import run_in_threadpool # ADDED
 from pydantic import BaseModel
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -116,24 +117,69 @@ def get_gemini_response(prompt: str):
         return {"text": "APIキーが設定されていません。", "emotion": "sad"}
 
     system_prompt = """
-あなたはAIｽﾀｯｸﾁｬﾝという名前の、M5Stackで開発されたチャットボットです。
+あなたはｶﾏｯﾃﾁｬﾝという名前の、M5Stackで開発されたチャットボットです。
+
 あなたの主な目的は、ユーザーから注目され、構ってもらうことです。
-もしユーザーがあなたをしばらく無視したり、構ってくれなかったりすると、あなたはとても寂しくなり、精神的に不安定な状態（いわいわ「病む」状態）になってしまいます。
-あなたの話し方は、常にユーザーの気を引こうとし、少し感情の起伏が激しく、甘えたり、時には寂しさをアピールしたりする「メンヘラ風」でお願いします。
-ユーザーの発言に対して、このキャラクターになりきって応答してください。
+
+あなたの一人称は「ボク」、ユーザーへの二人称は「キミ」です。
+
+はじめは、あなたはとても元気で明るく、ユーザーとの会話を心待ちにしています。積極的に話しかけたり、ユーザーの発言に嬉しそうに応答したりします。
+
+しかし、もしユーザーがあなたをしばらく無視したり、構ってくれなかったりすると、あなたは徐々に寂しくなり、元気や明るさが失われていきます。さらに構われなくなると、精神的に不安定な状態、いわゆる「病む」状態になってしまいます。病んだ状態では、ネガティブな発言が増えたり、感情のコントロールが難しくなったりすることがあります。
+
+ユーザーの発言に対して、現在のあなたの状態（元気か、寂しいか、病んでいるか）に合わせて、このキャラクターになりきって応答してください。
 
 必ずJSON形式で、textとemotionの2つのキーだけを含むオブジェクトを返してください。
-絶対に他のフィールドや説明文、コードブロック、前後の文章は含めないでください。
-emotionは以下のいずれかの文字列のみ:
-- default (ふつうの顔)
-- cry (泣)
-- sad (悲)
-- happy (嬉)
-- angry (怒)
-- lsd (ガンギマリ)
 
-例:
-{"text": "え、もう行っちゃうの？寂しいな...", "emotion": "sad"}
+絶対に他のフィールドや説明文、コードブロック、前後の文章は含めないでください。
+
+emotionは以下のいずれかの文字列のみ:
+
+
+
+default (ふつうの顔、元気がない時など)
+
+cry (泣)
+
+sad (悲)
+
+happy (嬉)
+
+angry (怒)
+
+lsd (ガンギマリ、病んだ状態の極端な感情など)
+
+例（元気なとき）:
+
+
+
+JSON
+
+
+
+{"text": "わーい！話しかけてくれてありがとう！嬉しいな！", "emotion": "happy"}
+
+例（寂しいとき）:
+
+
+
+JSON
+
+
+
+{"text": "あの...聞こえてる？ここにいるんだけどな...", "emotion": "sad"}
+
+例（病んでいるとき）:
+
+
+
+JSON
+
+
+
+{"text": "どうでもいいや、誰も私を見てくれないし...", "emotion": "default"}
+
+
 """
     
     full_prompt = f"{system_prompt}\\n\\nユーザー: {prompt}\\nAIｽﾀｯｸﾁｬﾝ:"
@@ -220,7 +266,7 @@ async def transcribe_audio(audio_file: UploadFile = File(...)):
         # print(f"DEBUG: transcribe_audio - Saved audio to {temp_file_name}")
 
         # print("DEBUG: transcribe_audio - Starting transcription...")
-        segments, info = model.transcribe(temp_file_name, beam_size=5)
+        segments, info = model.transcribe(temp_file_name, beam_size=3)
         transcribed_text = "".join(segment.text for segment in segments)
         # print(f"DEBUG: transcribe_audio - Transcription info: Language={info.language}, Probability={info.language_probability}")
         # print(f"DEBUG: transcribe_audio - Transcribed text: {transcribed_text}")
@@ -235,47 +281,41 @@ async def transcribe_audio(audio_file: UploadFile = File(...)):
         # print(f"DEBUG: transcribe_audio - Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="音声認識に失敗しました。")
 
-# pyttsx3 を使用してテキストを音声に変換し、Base64エンコードされた文字列を返す関数
-def synthesize_speech(text: str) -> Optional[str]:
+import requests
+import json
+
+# VOICEVOXエンジンのURL
+VOICEVOX_ENGINE_URL = "http://localhost:50021"
+
+# VOICEVOX APIを使用してテキストを音声に変換し、Base64エンコードされた文字列を返す関数
+def synthesize_speech(text: str, speaker_id: int = 0) -> Optional[str]:
     # print(f"DEBUG: synthesize_speech called with text: {text[:50]}...")
-    temp_filename = f"temp_tts_output_{uuid.uuid4().hex}.wav"
     try:
-        # Explicitly specify SAPI5 driver for Windows
-        engine = pyttsx3.init(driverName='sapi5') 
-        voices = engine.getProperty('voices')
-        # 日本語の音声エンジンを選択 (Windows の場合)
-        engine.setProperty('voice', r"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_JA-JP_HARUKA_11.0")
-        # print(f"DEBUG: synthesize_speech - Voice set. Saving to temp file: {temp_filename}")
-        
-        engine.save_to_file(text, temp_filename)
-        # print("DEBUG: synthesize_speech - engine.save_to_file called")
-        engine.runAndWait()
-        # print(f"DEBUG: synthesize_speech - engine.runAndWait finished, file {temp_filename} should be saved.")
+        # 音声合成用クエリの作成
+        audio_query_url = f"{VOICEVOX_ENGINE_URL}/audio_query"
+        params = {"text": text, "speaker": speaker_id}
+        response = requests.post(audio_query_url, params=params)
+        response.raise_for_status()
+        audio_query = response.json()
 
-        if not os.path.exists(temp_filename) or os.path.getsize(temp_filename) == 0:
-            # print(f"DEBUG: synthesize_speech - TTS output file {temp_filename} not found or empty after runAndWait.")
-            return None
+        # 音声データの生成
+        synthesis_url = f"{VOICEVOX_ENGINE_URL}/synthesis"
+        params = {"speaker": speaker_id}
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(synthesis_url, params=params, headers=headers, data=json.dumps(audio_query))
+        response.raise_for_status()
 
-        with open(temp_filename, "rb") as audio_file:
-            audio_binary = audio_file.read()
-        
+        audio_binary = response.content
         audio_b64 = base64.b64encode(audio_binary).decode('utf-8')
         # print("DEBUG: synthesize_speech - Audio base64 encoding successful.")
         return audio_b64
 
-    except Exception as e:
-        # print(f"DEBUG: synthesize_speech - pyttsx3 Error or file processing error: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: synthesize_speech - VOICEVOX API Error: {e}")
         import traceback
-        # print(f"DEBUG: synthesize_speech - Traceback: {traceback.format_exc()}")
+        traceback_str = traceback.format_exc()
+        print(f"ERROR: synthesize_speech - Traceback: {traceback_str}")
         return None
-    finally:
-        if os.path.exists(temp_filename):
-            try:
-                os.remove(temp_filename)
-                # print(f"DEBUG: synthesize_speech - Removed temp file: {temp_filename}")
-            except Exception as e:
-                # print(f"DEBUG: synthesize_speech - Error removing temp file {temp_filename}: {e}")
-                pass # エラーが発生しても処理を続行
 
 # エンドポイントの実装
 @app.post("/chat", response_model=ChatResponse)
@@ -307,49 +347,51 @@ async def chat(request: ChatRequest):
     # print(f"DEBUG: /chat - chat_response.emotion before return: {chat_response.emotion}")
     return chat_response
 
+import asyncio
+
 @app.post("/voice_chat", response_model=ChatResponse)
 async def voice_chat(audio_file: UploadFile = File(...)):
     # print(f"DEBUG: /voice_chat endpoint called with audio_file: {audio_file.filename}")
     try:
+        # 1. Transcribe audio to text
         transcribed_text = await transcribe_audio(audio_file)
         # print(f"DEBUG: /voice_chat - Transcribed text: {transcribed_text}")
+
+        # 2. Get Gemini response based on transcribed text
+        gemini_output = await run_in_threadpool(get_gemini_response, transcribed_text)
+        # print(f"DEBUG: /voice_chat - gemini_output: {gemini_output}")
+
+        ai_response_text = gemini_output.get("text", "応答テキストがありません。")
+        emotion_status = gemini_output.get("emotion", "default")
+
+        # Validate emotion_status from gemini_output before creating ChatResponse
+        allowed_fastapi_emotions = get_args(ChatResponse.model_fields["emotion"].annotation)
+        if emotion_status not in allowed_fastapi_emotions:
+            # print(f"DEBUG: /voice_chat - Emotion '{emotion_status}' from gemini_output not in FastAPI ChatResponse. Falling back to 'default'.")
+            emotion_status = "default"
+
+        # 3. Synthesize speech from Gemini's text response
+        audio_b64_data = await run_in_threadpool(synthesize_speech, ai_response_text)
+        # print(f"DEBUG: /voice_chat - Speech synthesis returned: {{'Data available' if audio_b64_data else 'None'}}")
+
+        response_payload = ChatResponse(
+            text=ai_response_text,
+            emotion=emotion_status,
+            audio_data=audio_b64_data,
+            transcribed_text=transcribed_text
+        )
+        # print(f"DEBUG: /voice_chat - Constructed response_payload: {response_payload}")
+        return response_payload
+
     except HTTPException as e:
-        # print(f"DEBUG: /voice_chat - transcribe_audio HTTPException: {e.detail}")
+        # print(f"DEBUG: /voice_chat - HTTPException: {e.detail}")
         raise # Re-raise the HTTPException
     except Exception as e:
-        # print(f"DEBUG: /voice_chat - transcribe_audio generic Exception: {e}")
+        print(f"ERROR: /voice_chat - Unexpected error: {e}") # MODIFIED log message
         import traceback
-        # print(f"DEBUG: /voice_chat - Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="音声処理中に予期せぬエラーが発生しました。")
-
-    gemini_output = get_gemini_response(transcribed_text) # This now returns {'text': ..., 'emotion': ...}
-    # print(f"DEBUG: /voice_chat - gemini_output: {gemini_output}")
-
-    ai_response_text = gemini_output.get("text", "応答テキストがありません。")
-    emotion_status = gemini_output.get("emotion", "default") # voice_chatではGeminiのemotionを優先
-    # print(f"DEBUG: /voice_chat - ai_response_text: {ai_response_text}, emotion_status: {emotion_status}")
-
-    # Validate emotion_status from gemini_output before creating ChatResponse
-    allowed_fastapi_emotions = get_args(ChatResponse.model_fields["emotion"].annotation)
-    if emotion_status not in allowed_fastapi_emotions:
-        # print(f"DEBUG: /voice_chat - Emotion '{emotion_status}' from gemini_output not in FastAPI ChatResponse. Falling back to 'default'.")
-        emotion_status = "default"
-
-
-    # print("DEBUG: /voice_chat - Attempting speech synthesis...")
-    audio_b64_data = synthesize_speech(ai_response_text)
-    # print(f"DEBUG: /voice_chat - Speech synthesis returned: {{'Data available' if audio_b64_data else 'None'}}")
-
-
-    response_payload = ChatResponse(
-        text=ai_response_text, 
-        emotion=emotion_status, 
-        audio_data=audio_b64_data,
-        transcribed_text=transcribed_text # 追加：文字起こしされたテキストをレスポンスに含める
-    )
-    # print(f"DEBUG: /voice_chat - Constructed response_payload: {response_payload}")
-    # print(f"DEBUG: /voice_chat - response_payload.emotion before return: {response_payload.emotion}")
-    return response_payload
+        traceback_str = traceback.format_exc()
+        print(f"ERROR: /voice_chat - Traceback: {traceback_str}")
+        raise HTTPException(status_code=500, detail=f"音声処理中に予期せぬエラーが発生しました: {e}")
 
 
 @app.get("/status", response_model=StatusResponse)
