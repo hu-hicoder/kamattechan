@@ -1,0 +1,18 @@
+[project]
+name = "kamattechan"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115.12",
+    "faster-whisper>=1.1.1",
+    "google-generativeai>=0.8.5",
+    "numpy>=2.2.6",
+    "python-dotenv>=1.1.0",
+    "python-multipart>=0.0.20",
+    "pyttsx3>=2.98",
+    "scipy>=1.15.3",
+    "sounddevice>=0.5.2",
+    "uvicorn>=0.34.2",
+]
