@@ -1,3 +1,5 @@
 .env
+output/
 recording.wav
+
 __pycache__/
