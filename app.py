@@ -1,3 +1,4 @@
+import traceback
 import os
 import json
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -7,8 +8,21 @@ from dotenv import load_dotenv
 import datetime # datetimeモジュールを追加
 import uuid
 import base64
-import pyttsx3
-from typing import Optional, Literal, get_args # Added get_args
+from typing import Optional, Literal, get_args
+import requests # requestsモジュールを追加
+
+# M5StackのIPアドレスを設定
+M5STACK_IP_ADDRESS = "10.241.86.100" # ここにM5Stackの実際のIPアドレスを設定してください
+
+# 表情文字列とM5Stackの表情IDのマッピング
+EMOTION_MAP = {
+    "default": 0,
+    "happy": 1,
+    "angry": 2,
+    "sad": 3,
+    "cry": 4,
+    "Gangimari": 5 # Gangimariに対応
+}
 
 # .env ファイルから環境変数を読み込む
 load_dotenv()
@@ -29,12 +43,12 @@ class ChatRequest(BaseModel):
 # Schema for Gemini API response (only fields LLM is asked to generate)
 class GeminiChatSchema(BaseModel):
     text: str
-    emotion: Literal["default", "cry", "sad", "happy", "angry", "lsd"]
+    emotion: Literal["default", "cry", "sad", "happy", "angry", "Gangimari"]
 
 # FastAPI response model (can include fields not directly from LLM like audio_data)
 class ChatResponse(BaseModel):
     text: str
-    emotion: Literal["default", "cry", "sad", "happy", "angry", "lsd"]
+    emotion: Literal["default", "cry", "sad", "happy", "angry", "Gangimari"]
     audio_data: Optional[str] = None # Base64エンコードされた音声データ
     transcribed_text: Optional[str] = None # 追加：文字起こしされたテキスト
     # 必要に応じて他の表情・動きパラメータを追加
@@ -118,7 +132,7 @@ def get_gemini_response(prompt: str):
     system_prompt = """
 あなたはｶﾏｯﾃﾁｬﾝという名前の、M5Stackで開発されたチャットボットです。
 あなたの主な目的は、ユーザーから注目され、構ってもらうことです。
-あなたの一人称は「ボク」、ユーザーへの二人称は「キミ」です。
+あなたの一人称は「ボク」です。
 はじめは、あなたはとても元気で明るく、ユーザーとの会話を心待ちにしています。積極的に話しかけたり、ユーザーの発言に嬉しそうに応答したりします。
 しかし、もしユーザーがあなたをしばらく無視したり、構ってくれなかったりすると、あなたは徐々に寂しくなり、元気や明るさが失われていきます。さらに構われなくなると、精神的に不安定な状態、いわゆる「病む」状態になってしまいます。病んだ状態では、ネガティブな発言が増えたり、感情のコントロールが難しくなったりすることがあります。
 ユーザーの発言に対して、現在のあなたの状態（元気か、寂しいか、病んでいるか）に合わせて、このキャラクターになりきって応答してください。
@@ -130,7 +144,7 @@ cry (泣)
 sad (悲)
 happy (嬉)
 angry (怒)
-lsd (ガンギマリ、病んだ状態の極端な感情など)
+Gangimari (ガンギマリ、病んだ状態の極端な感情など)
 例（元気なとき）:
 JSON
 
@@ -147,13 +161,10 @@ JSON
 """
     
     full_prompt = f"{system_prompt}\\n\\nユーザー: {prompt}\\nAIｽﾀｯｸﾁｬﾝ:"
-    # print(f"DEBUG: get_gemini_response - full_prompt: {full_prompt[:100]}...") # Log first 100 chars
 
     try:
-        # print("DEBUG: get_gemini_response - Configuring genai with API key...")
         genai.configure(api_key=config_manager._api_key) # 最新のAPIキーで設定
         model_name = 'models/gemini-2.0-flash'
-        # print(f"DEBUG: get_gemini_response - Using model: {model_name}")
         model = genai.GenerativeModel(model_name)
 
         # Gemini APIが期待する形式でスキーマを明示的に定義
@@ -168,9 +179,7 @@ JSON
             },
             "required": ["text", "emotion"]
         }
-        # print(f"DEBUG: get_gemini_response - Constructed Gemini API schema: {gemini_api_schema}")
 
-        # print("DEBUG: get_gemini_response - Calling model.generate_content with explicit dictionary schema...")
         response = model.generate_content(
             full_prompt,
             generation_config=genai.GenerationConfig(
@@ -178,38 +187,26 @@ JSON
                 response_schema=gemini_api_schema # 明示的な辞書スキーマを使用
             )
         )
-        # print(f"DEBUG: get_gemini_response - Raw response object: {response}")
-        
-        response_text = response.text.strip()
-        # print(f"DEBUG: get_gemini_response - response.text (stripped): {response_text}")
 
-        # print("DEBUG: get_gemini_response - Attempting to parse JSON...")
+        response_text = response.text.strip()
+
         try:
             response_data = json.loads(response_text)
-            # print(f"DEBUG: get_gemini_response - Parsed response_data: {response_data}")
         except json.JSONDecodeError as e:
-            # print(f"DEBUG: get_gemini_response - JSONDecodeError: {e}")
-            # print(f"DEBUG: get_gemini_response - Faulty JSON string: {response_text}")
             return {"text": "AIモデルからの応答をJSON形式で解析できませんでした。", "emotion": "sad"}
 
         ai_response_text = response_data.get("text", "応答テキストがありません。")
         emotion_status = response_data.get("emotion", "default") # Default to "default"
-        # print(f"DEBUG: get_gemini_response - Extracted ai_response_text: {ai_response_text}")
-        # print(f"DEBUG: get_gemini_response - Extracted emotion_status: {emotion_status}")
 
         # Validate emotion_status against Literal values from GeminiChatSchema
         allowed_emotions = get_args(GeminiChatSchema.model_fields["emotion"].annotation)
         if emotion_status not in allowed_emotions:
-            # print(f"DEBUG: get_gemini_response - Invalid emotion '{emotion_status}' received from API. Falling back to 'default'.")
             emotion_status = "default"
 
-        # print(f"DEBUG: get_gemini_response - Returning: {{'text': '{ai_response_text}', 'emotion': '{emotion_status}'}}")
         return {"text": ai_response_text, "emotion": emotion_status} # Only return text and emotion
 
     except Exception as e:
-        # print(f"DEBUG: get_gemini_response - Gemini API Error: {e}")
         import traceback
-        # print(f"DEBUG: get_gemini_response - Traceback: {traceback.format_exc()}")
         return {"text": "AIモデルからの応答を取得できませんでした。", "emotion": "sad"}
 
 # Whisperモデルの初期化
@@ -219,83 +216,99 @@ model = WhisperModel("base", device="cpu", compute_type="int8") # This line was 
 
 # 音声データを文字起こしする関数
 async def transcribe_audio(audio_file: UploadFile = File(...)):
-    # print(f"DEBUG: transcribe_audio called with filename: {audio_file.filename}")
     try:
-        temp_file_name = f"temp_audio_{uuid.uuid4().hex}.wav"
-        # print(f"DEBUG: transcribe_audio - temp_file_name: {temp_file_name}")
+        temp_file_name = f"temp_audio_{uuid.uuid4().hex}.{audio_file.filename.split('.')[-1] if audio_file.filename else 'wav'}"
 
         contents = await audio_file.read()
         with open(temp_file_name, "wb") as f:
             f.write(contents)
-        # print(f"DEBUG: transcribe_audio - Saved audio to {temp_file_name}")
 
-        # print("DEBUG: transcribe_audio - Starting transcription...")
+        # Whisperモデルで文字起こし
         segments, info = model.transcribe(temp_file_name, beam_size=5)
-        transcribed_text = "".join(segment.text for segment in segments)
-        # print(f"DEBUG: transcribe_audio - Transcription info: Language={info.language}, Probability={info.language_probability}")
-        # print(f"DEBUG: transcribe_audio - Transcribed text: {transcribed_text}")
-        print()
-        os.remove(temp_file_name)
-        # print(f"DEBUG: transcribe_audio - Removed temp file: {temp_file_name}")
+        transcribed_text = "".join([segment.text for segment in segments])
+        
+        os.remove(temp_file_name) # 文字起こし後にファイルを削除
         return transcribed_text
 
     except Exception as e:
-        # print(f"DEBUG: transcribe_audio - Whisper Error: {e}")
         import traceback
-        # print(f"DEBUG: transcribe_audio - Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="音声認識に失敗しました。")
+        print(f"Error during audio transcription: {e}") # Log the actual error
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"音声認識に失敗しました: {str(e)}")
 
+
+import requests
+import base64
 # pyttsx3 を使用してテキストを音声に変換し、Base64エンコードされた文字列を返す関数
-def synthesize_speech(text: str) -> Optional[str]:
-    # print(f"DEBUG: synthesize_speech called with text: {text[:50]}...")
-    temp_filename = f"temp_tts_output_{uuid.uuid4().hex}.wav"
+def synthesize_speech_with_voicevox(text: str, speaker: int = 0) -> Optional[str]:
+    """
+    VOICEVOX を使用してテキストを音声に変換し、Base64エンコードされた文字列を返す関数。
+
+    Args:
+        text (str): 変換するテキスト。
+        speaker (int): VOICEVOX の話者ID。
+
+    Returns:
+        Optional[str]: Base64エンコードされた音声データ。エラーが発生した場合は None。
+    """
     try:
-        # Explicitly specify SAPI5 driver for Windows
-        engine = pyttsx3.init(driverName='sapi5') 
-        voices = engine.getProperty('voices')
-        # 日本語の音声エンジンを選択 (Windows の場合)
-        engine.setProperty('voice', r"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_JA-JP_HARUKA_11.0")
-        # print(f"DEBUG: synthesize_speech - Voice set. Saving to temp file: {temp_filename}")
-        
-        engine.save_to_file(text, temp_filename)
-        # print("DEBUG: synthesize_speech - engine.save_to_file called")
-        engine.runAndWait()
-        # print(f"DEBUG: synthesize_speech - engine.runAndWait finished, file {temp_filename} should be saved.")
+        # VOICEVOX Engine の URL
+        base_url = "http://localhost:50021"  # デフォルトのポート
 
-        if not os.path.exists(temp_filename) or os.path.getsize(temp_filename) == 0:
-            # print(f"DEBUG: synthesize_speech - TTS output file {temp_filename} not found or empty after runAndWait.")
-            return None
+        # 音声合成用のクエリを作成
+        params = {
+            "text": text,
+            "speaker": speaker
+        }
+        query_url = f"{base_url}/audio_query"
+        response = requests.post(query_url, params=params)
+        response.raise_for_status()  # エラーレスポンスをチェック
+        query_data = response.json()
 
-        with open(temp_filename, "rb") as audio_file:
-            audio_binary = audio_file.read()
-        
+        # 音声合成を実行
+        synthesis_url = f"{base_url}/synthesis?speaker={speaker}" # Add speaker query parameter
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(synthesis_url, headers=headers, json=query_data)
+        response.raise_for_status()
+
+        # 音声データをBase64エンコード
+        audio_binary = response.content
         audio_b64 = base64.b64encode(audio_binary).decode('utf-8')
-        # print("DEBUG: synthesize_speech - Audio base64 encoding successful.")
         return audio_b64
 
-    except Exception as e:
-        # print(f"DEBUG: synthesize_speech - pyttsx3 Error or file processing error: {e}")
-        import traceback
-        # print(f"DEBUG: synthesize_speech - Traceback: {traceback.format_exc()}")
+    except requests.exceptions.RequestException as e:
+        print(f"VOICEVOX API Error: {e}")
         return None
-    finally:
-        if os.path.exists(temp_filename):
-            try:
-                os.remove(temp_filename)
-                # print(f"DEBUG: synthesize_speech - Removed temp file: {temp_filename}")
-            except Exception as e:
-                # print(f"DEBUG: synthesize_speech - Error removing temp file {temp_filename}: {e}")
-                pass # エラーが発生しても処理を続行
+    except Exception as e:
+        print(f"Error during VOICEVOX synthesis: {e}")
+        return None
 
+def synthesize_speech(text: str) -> Optional[str]:
+    return synthesize_speech_with_voicevox(text)
+
+def send_expression_to_m5stack(emotion: str):
+    """M5Stackに表情変更リクエストを送信する"""
+    if M5STACK_IP_ADDRESS:
+        try:
+            expression_id = EMOTION_MAP.get(emotion.lower(), EMOTION_MAP["default"])
+            url = f"http://{M5STACK_IP_ADDRESS}/setExpression"
+            payload = {"expression": str(expression_id)}
+            # タイムアウトを設定して、M5Stackが応答しない場合に長時間待機するのを防ぐ
+            response = requests.post(url, data=payload, timeout=5)
+            response.raise_for_status()
+            print(f"M5Stackに表情 '{emotion}' (ID: {expression_id}) を送信しました。")
+        except requests.exceptions.RequestException as e:
+            print(f"M5Stackへの表情送信に失敗しました: {e}")
+        except Exception as e:
+            print(f"M5Stackへの表情送信中に予期せぬエラーが発生しました: {e}")
+    else:
+        print("M5STACK_IP_ADDRESSが設定されていません。")
 # エンドポイントの実装
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    # print(f"DEBUG: /chat endpoint called with request: {request}")
     status_manager.update_status(last_interaction=datetime.datetime.now().isoformat())
-    # print("DEBUG: /chat - Status updated")
 
     gemini_output = get_gemini_response(request.text)
-    # print(f"DEBUG: /chat - gemini_output: {gemini_output}")
 
     ai_response_text = gemini_output.get("text", "応答テキストがありません。")
     emotion_status = gemini_output.get("emotion", "default") # /chatでは音声は返さないのでdefaultはneutral
@@ -303,62 +316,64 @@ async def chat(request: ChatRequest):
     # Validate emotion_status from gemini_output before creating ChatResponse
     allowed_fastapi_emotions = get_args(ChatResponse.model_fields["emotion"].annotation)
     if emotion_status not in allowed_fastapi_emotions:
-        # print(f"DEBUG: /chat - Emotion '{emotion_status}' from gemini_output not in FastAPI ChatResponse. Falling back to 'default'.")
         emotion_status = "default"
     
     audio_b64_data = synthesize_speech(ai_response_text)
 
+    send_expression_to_m5stack(emotion_status)
+
     chat_response = ChatResponse(
         text=ai_response_text,
-        emotion=emotion_status, 
+        emotion=emotion_status,
         audio_data=audio_b64_data
     )
-    # print(f"DEBUG: /chat - Constructed chat_response: {chat_response}")
-    # print(f"DEBUG: /chat - chat_response.emotion before return: {chat_response.emotion}")
     return chat_response
 
 @app.post("/voice_chat", response_model=ChatResponse)
 async def voice_chat(audio_file: UploadFile = File(...)):
-    # print(f"DEBUG: /voice_chat endpoint called with audio_file: {audio_file.filename}")
+    # 1. 音声ファイルの保存処理と文字起こし
     try:
+        # transcribe_audio内でファイルの読み書きとWhisperによる文字起こしが行われる
         transcribed_text = await transcribe_audio(audio_file)
-        # print(f"DEBUG: /voice_chat - Transcribed text: {transcribed_text}")
     except HTTPException as e:
-        # print(f"DEBUG: /voice_chat - transcribe_audio HTTPException: {e.detail}")
-        raise # Re-raise the HTTPException
+        # transcribe_audio内でHTTPExceptionが発生した場合はそのまま再送出
+        raise
     except Exception as e:
-        # print(f"DEBUG: /voice_chat - transcribe_audio generic Exception: {e}")
-        import traceback
-        # print(f"DEBUG: /voice_chat - Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="音声処理中に予期せぬエラーが発生しました。")
+        print(f"An error occurred during audio transcription and saving: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error during audio transcription and saving: {str(e)}")
 
-    gemini_output = get_gemini_response(transcribed_text) # This now returns {'text': ..., 'emotion': ...}
-    # print(f"DEBUG: /voice_chat - gemini_output: {gemini_output}")
-
-    ai_response_text = gemini_output.get("text", "応答テキストがありません。")
-    emotion_status = gemini_output.get("emotion", "default") # voice_chatではGeminiのemotionを優先
-    # print(f"DEBUG: /voice_chat - ai_response_text: {ai_response_text}, emotion_status: {emotion_status}")
+    # 2. AIモデル (Gemini) による応答生成
+    try:
+        gemini_output = get_gemini_response(transcribed_text)
+        ai_response_text = gemini_output.get("text", "応答テキストがありません。")
+        emotion_status = gemini_output.get("emotion", "default")
+    except Exception as e:
+        print(f"An error occurred during AI response generation with Gemini: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error during AI response generation: {str(e)}")
 
     # Validate emotion_status from gemini_output before creating ChatResponse
     allowed_fastapi_emotions = get_args(ChatResponse.model_fields["emotion"].annotation)
     if emotion_status not in allowed_fastapi_emotions:
-        # print(f"DEBUG: /voice_chat - Emotion '{emotion_status}' from gemini_output not in FastAPI ChatResponse. Falling back to 'default'.")
         emotion_status = "default"
 
+    # 3. 音声合成
+    try:
+        audio_b64_data = synthesize_speech(ai_response_text)
+    except Exception as e:
+        print(f"An error occurred during speech synthesis: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error during speech synthesis: {str(e)}")
 
-    # print("DEBUG: /voice_chat - Attempting speech synthesis...")
-    audio_b64_data = synthesize_speech(ai_response_text)
-    # print(f"DEBUG: /voice_chat - Speech synthesis returned: {{'Data available' if audio_b64_data else 'None'}}")
-
+    send_expression_to_m5stack(emotion_status)
 
     response_payload = ChatResponse(
-        text=ai_response_text, 
-        emotion=emotion_status, 
+        text=ai_response_text,
+        emotion=emotion_status,
         audio_data=audio_b64_data,
-        transcribed_text=transcribed_text # 追加：文字起こしされたテキストをレスポンスに含める
+        transcribed_text=transcribed_text
     )
-    # print(f"DEBUG: /voice_chat - Constructed response_payload: {response_payload}")
-    # print(f"DEBUG: /voice_chat - response_payload.emotion before return: {response_payload.emotion}")
     return response_payload
 
 

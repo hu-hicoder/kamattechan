@@ -109,7 +109,10 @@ def record_audio(filename="recording.wav", duration=5, fs=44100, channels=1):
         print(f"録音完了: {filename}")
         return filename
     except Exception as e:
+        import traceback
         print(f"録音中にエラーが発生しました: {e}")
+        print(f"エラーの型: {type(e)}")
+        print(f"トレースバック: {traceback.format_exc()}")
         return None
 
 def main():
